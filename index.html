@@ -1,38 +1,15 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Me</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Me</title>
 </head>
-<style>
-    body {
-        background-color: #000;
-    }
-
-    h1,
-    h3 {
-        color: #fff;
-    }
-
-    #front-end {
-        transition: ease-in color .3s;
-    }
-</style>
 
 <body>
-    <h1>周 杰</h1>
-    <h3>除了<span id="front-end">前端</span> 我什么都不会</h3>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
 </body>
-<script>
-    const colors = ["#42b883", "#087EA4", "#E45126", "#E4A228", "#0C73B8", "#00DC82", "#9FEAF9"]
-    const dom = document.getElementById("front-end")
-    let current = 0
-    setInterval(() => {
-        dom.style.color = colors[current]
-        current = (current + 1) % colors.length
-    }, 1000)
-</script>
 
 </html>
