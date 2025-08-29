@@ -1,21 +1,9 @@
 import * as THREE from 'three'
-import React, { Suspense, useRef, useMemo } from 'react'
+import { Suspense, useRef, useMemo } from 'react'
 import { Canvas, extend, useThree, useLoader, useFrame } from '@react-three/fiber'
 import { OrbitControls, Sky } from '@react-three/drei'
 import { Water } from 'three-stdlib'
 extend({ Water })
-
-declare global {
-    namespace JSX {
-        interface IntrinsicElements {
-            water: React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement> & {
-                args?: any
-                ref?: React.Ref<any>
-                ['rotation-x']?: number
-            }
-        }
-    }
-}
 
 const Ocean = () => {
     const ref = useRef<THREE.Mesh | any>(null)
