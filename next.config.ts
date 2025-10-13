@@ -2,7 +2,7 @@ import type { NextConfig } from "next"
 
 const nextConfig: NextConfig = {
   output: 'export',
-  distDir: 'doc',
+  distDir: 'docs',
   basePath: process.env.PAGES_BASE_PATH,
 }
 
