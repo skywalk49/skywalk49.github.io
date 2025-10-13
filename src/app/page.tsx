@@ -1,7 +1,8 @@
+"use client"
 import { useState, useCallback } from 'react'
-import Sea from "./components/Sea"
-import SplitText from "./components/SplitText"
-import "./App.css"
+import Sea from "@/components/Sea"
+import SplitText from "@/components/SplitText"
+import "./page.css"
 
 const App = () => {
   const [finish, setFinish] = useState(false)
