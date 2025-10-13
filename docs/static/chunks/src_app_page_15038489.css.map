@@ -1,6 +1,0 @@
-{
-  "version": 3,
-  "sources": [],
-  "sections": [
-    {"offset": {"line": 1, "column": 0}, "map": {"version":3,"sources":["file:///E:/skywalk49-next/src/app/page.css"],"sourcesContent":["* {\n  box-sizing: border-box;\n  padding: 0;\n  margin: 0;\n}\n\nhtml,\nbody {\n  width: 100%;\n  height: 100%;\n}\n\n.user {\n  position: absolute;\n  top: 50px;\n  left: 5%;\n  z-index: 10;\n}\n\n.text {\n  font-size: 30px;\n  color: #fff;\n  font-weight: 600;\n  letter-spacing: 10px;\n}\n\n.desc {\n  color: #fff;\n  font-weight: 600;\n  letter-spacing: 1px;\n  opacity: 0.8;\n}"],"names":[],"mappings":"AAAA;;;;;;AAMA;;;;;AAMA;;;;;;;AAOA;;;;;;;AAOA","debugId":null}}]
-}
