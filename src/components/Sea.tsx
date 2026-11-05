@@ -21,11 +21,24 @@ const DAY_END = 18;
 const REFLECTION_EXCLUDED_LAYER = 1;
 const REFLECTION_EXCLUDED_MASK = 1 << REFLECTION_EXCLUDED_LAYER;
 
-const DAY_SUN_POSITION: [number, number, number] = [500, 150, -1000];
+// 天体在屏幕上的归一化落点（x/y 均为 0~1）。
+// 早期用固定世界坐标，竖屏时水平视角收窄到 23°，太阳/月亮会直接跑出画面；
+// 改成先定屏幕位置、再反推世界方向，就能保证任何宽高比下都完整可见。
+const SKY_ANCHOR = {
+  day: { x: 0.87, y: 0.29 },
+  night: { x: 0.88, y: 0.13 },
+};
+
 // 白天保持原版：光源方向为零向量，水面既无漫反射也无镜面高光。
 const NO_SUN_DIRECTION = new THREE.Vector3(0, 0, 0);
-const MOON_DIRECTION = new THREE.Vector3(0.3, 0.3, -0.9).normalize();
-const MOON_POSITION = MOON_DIRECTION.clone().multiplyScalar(5200);
+const MOON_DISTANCE = 5200;
+// 用 sprite 而不是球体：球体偏离视轴时会被透视拉成群圆。
+// 实测 1440x900 下长轴比 1.21（视轴夹角 36°，理论 1/cos36°=1.24），肉眼可辨。
+// sprite 始终正对屏幕，视角怎么转都是正圆；尺寸取原球体直径 2*85，观感不变。
+const MOON_SIZE = 170;
+// drei Sky 的太阳盘大小由内部着色器决定，与距离无关；这里取一个足够远的值保持原观感。
+const SUN_DISTANCE = 1100;
+const FALLBACK_MOON_DIRECTION = new THREE.Vector3(0.3, 0.3, -0.9).normalize();
 
 type WaterMesh = THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>;
 
@@ -47,7 +60,7 @@ const THEME = {
   night: {
     waterColor: new THREE.Color(0x020a12),
     sunColor: new THREE.Color(0x8aa4c2),
-    sunDirection: MOON_DIRECTION.clone(),
+    sunDirection: FALLBACK_MOON_DIRECTION.clone(),
     distortionScale: 4.1,
     // 保留足够反射细节以维持纹理，但整体压到夜空之下，避免海面比天更亮。
     waterDim: 0.46,
@@ -86,6 +99,44 @@ const useReducedMotion = () => {
   }, []);
 
   return reduced;
+};
+
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+
+// 把屏幕归一化落点反推成世界方向。
+// 只依赖视口尺寸与相机位置，不跟随相机旋转：用户拖拽视角时天体依然留在世界中，
+// 但当窗口变窄、水平视角收小时会自动重算，避免天体被挤出画面。
+// 这里用解析式而非 unproject，避免首帧 matrixWorld 尚未更新导致方向错误。
+const useSkyDirection = (anchor: { x: number; y: number }) => {
+  const camera = useThree((state) => state.camera);
+  const width = useThree((state) => state.size.width);
+  const height = useThree((state) => state.size.height);
+
+  return useMemo(() => {
+    const perspective = camera as THREE.PerspectiveCamera;
+    const fov = (perspective.fov ?? 55) * (Math.PI / 180);
+    const aspect = width / Math.max(height, 1);
+
+    // 相机朝向原点（与 OrbitControls 的 target 一致）。
+    const forwards = perspective.position.clone().negate();
+    if (forwards.lengthSq() < 1e-6) forwards.set(0, 0, -1);
+    forwards.normalize();
+
+    const right = new THREE.Vector3().crossVectors(forwards, WORLD_UP);
+    if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
+    right.normalize();
+    const up = new THREE.Vector3().crossVectors(right, forwards).normalize();
+
+    const tan = Math.tan(fov / 2);
+    const ndcX = anchor.x * 2 - 1;
+    const ndcY = 1 - anchor.y * 2;
+
+    return forwards
+      .clone()
+      .addScaledVector(right, ndcX * tan * aspect)
+      .addScaledVector(up, ndcY * tan)
+      .normalize();
+  }, [anchor.x, anchor.y, camera, width, height]);
 };
 
 const Ocean = ({
@@ -168,6 +219,9 @@ const Starfield = ({
     const positions = new Float32Array(count * 3);
     const sizes = new Float32Array(count);
     const phases = new Float32Array(count);
+    // 每颗星有独立的闪烁频率与幅度，避免整片星空同步呼吸。
+    const rates = new Float32Array(count);
+    const depths = new Float32Array(count);
     const vector = new THREE.Vector3();
 
     for (let i = 0; i < count; i++) {
@@ -180,12 +234,18 @@ const Starfield = ({
       positions[i * 3 + 2] = vector.z;
       sizes[i] = 2.0 + Math.random() * 3.6;
       phases[i] = Math.random() * Math.PI * 2;
+      // 少数亮星闪得更快更深，整体分布偏慢
+      const sparkle = Math.random();
+      rates[i] = 0.45 + sparkle * sparkle * 2.2;
+      depths[i] = 0.3 + sparkle * 0.62;
     }
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
     geo.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
     geo.setAttribute("aPhase", new THREE.BufferAttribute(phases, 1));
+    geo.setAttribute("aRate", new THREE.BufferAttribute(rates, 1));
+    geo.setAttribute("aDepth", new THREE.BufferAttribute(depths, 1));
     return geo;
   }, []);
 
@@ -199,6 +259,8 @@ const Starfield = ({
       vertexShader: `
                 attribute float aSize;
                 attribute float aPhase;
+                attribute float aRate;
+                attribute float aDepth;
                 uniform float uTime;
                 uniform float uPixelRatio;
                 uniform float uOpacity;
@@ -207,11 +269,17 @@ const Starfield = ({
                 void main() {
                     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
                     gl_Position = projectionMatrix * mvPosition;
-                    gl_PointSize = aSize * uPixelRatio;
 
                     float heightFade = smoothstep(0.02, 0.34, normalize(position).y);
-                    float twinkle = 0.72 + 0.28 * sin(uTime * 0.7 + aPhase);
-                    vAlpha = twinkle * heightFade * uOpacity;
+
+                    // 双层正弦叠加，让闪烁不那么规律，更像真实星点
+                    float wave =
+                        sin(uTime * aRate + aPhase) * 0.68 +
+                        sin(uTime * aRate * 2.37 + aPhase * 1.9) * 0.32;
+                    float twinkle = 1.0 - aDepth * (0.5 - 0.5 * wave);
+
+                    gl_PointSize = aSize * uPixelRatio * (0.82 + twinkle * 0.3);
+                    vAlpha = clamp(twinkle, 0.0, 1.0) * heightFade * uOpacity;
                 }
             `,
       fragmentShader: `
@@ -256,6 +324,12 @@ const Starfield = ({
 };
 
 const Moon = ({ night }: { night: boolean }) => {
+  const direction = useSkyDirection(SKY_ANCHOR.night);
+  const position = useMemo(
+    () => direction.clone().multiplyScalar(MOON_DISTANCE),
+    [direction],
+  );
+
   const glowTexture = useMemo(() => {
     const size = 256;
     const canvas = document.createElement("canvas");
@@ -271,9 +345,9 @@ const Moon = ({ night }: { night: boolean }) => {
         size / 2,
         size / 2,
       );
-      gradient.addColorStop(0, "rgba(226, 238, 255, 0.34)");
-      gradient.addColorStop(0.2, "rgba(150, 185, 240, 0.1)");
-      gradient.addColorStop(0.5, "rgba(110, 150, 215, 0.025)");
+      gradient.addColorStop(0, "rgba(226, 238, 255, 0.26)");
+      gradient.addColorStop(0.2, "rgba(150, 185, 240, 0.08)");
+      gradient.addColorStop(0.5, "rgba(110, 150, 215, 0.02)");
       gradient.addColorStop(1, "rgba(110, 150, 215, 0)");
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, size, size);
@@ -291,6 +365,12 @@ const Moon = ({ night }: { night: boolean }) => {
     canvas.height = size;
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
+
+    // 画成圆形贴图：圆外保持透明，否则 sprite 显示为一个方块。
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
+    ctx.clip();
 
     ctx.fillStyle = "#fffdf3";
     ctx.fillRect(0, 0, size, size);
@@ -331,6 +411,8 @@ const Moon = ({ night }: { night: boolean }) => {
       ctx.fill();
     }
 
+    ctx.restore();
+
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.needsUpdate = true;
@@ -346,7 +428,7 @@ const Moon = ({ night }: { night: boolean }) => {
 
   return (
     <group
-      position={MOON_POSITION}
+      position={position}
       renderOrder={5}
       layers-mask={REFLECTION_EXCLUDED_MASK}
       visible={night}
@@ -355,40 +437,47 @@ const Moon = ({ night }: { night: boolean }) => {
         <spriteMaterial
           map={glowTexture}
           transparent
-          opacity={1}
+          opacity={0.72}
           depthWrite={false}
           depthTest={false}
           blending={THREE.AdditiveBlending}
           toneMapped={false}
         />
       </sprite>
-      <mesh layers-mask={REFLECTION_EXCLUDED_MASK}>
-        <sphereGeometry args={[85, 48, 48]} />
-        <meshBasicMaterial
+      <sprite
+        scale={[MOON_SIZE, MOON_SIZE, 1]}
+        renderOrder={6}
+        layers-mask={REFLECTION_EXCLUDED_MASK}
+      >
+        <spriteMaterial
           map={surfaceTexture ?? undefined}
           color={surfaceTexture ? "#ffffff" : "#fffdf3"}
           transparent
-          opacity={1}
+          opacity={0.78}
           depthWrite={false}
           depthTest={false}
           toneMapped={false}
           fog={false}
         />
-      </mesh>
+      </sprite>
     </group>
   );
 };
 
-const SkyDome = ({ night }: { night: boolean }) => {
+const SkyDome = ({ night, animate }: { night: boolean; animate: boolean }) => {
+  const moonDirection = useSkyDirection(SKY_ANCHOR.night);
+
   const material = useMemo(
     () =>
       new THREE.ShaderMaterial({
         uniforms: {
           uOpacity: { value: 0 },
+          uTime: { value: 0 },
           uTopColor: { value: new THREE.Color("#01060f") },
           uMidColor: { value: new THREE.Color("#04101f") },
           uHorizonColor: { value: new THREE.Color(NIGHT_HORIZON) },
-          uMoonDirection: { value: MOON_DIRECTION.clone() },
+          // 初值占位，真实方向由下方 effect 写入，避免视口变化时重建材质。
+          uMoonDirection: { value: FALLBACK_MOON_DIRECTION.clone() },
         },
         vertexShader: `
           varying vec3 vDirection;
@@ -400,6 +489,7 @@ const SkyDome = ({ night }: { night: boolean }) => {
         `,
         fragmentShader: `
           uniform float uOpacity;
+          uniform float uTime;
           uniform vec3 uTopColor;
           uniform vec3 uMidColor;
           uniform vec3 uHorizonColor;
@@ -414,12 +504,15 @@ const SkyDome = ({ night }: { night: boolean }) => {
             color = mix(color, uTopColor, smoothstep(0.22, 0.92, h));
 
             // 低频云气：让天空有明暗起伏，反射到海面才不是一整块死色。
+            // 加入缓慢的时间偏移，云层会朝一个方向缓缓漂移。
             vec2 p = dir.xz / max(dir.y * 0.75 + 0.35, 0.16);
+            vec2 drift = vec2(uTime * 0.0042, uTime * 0.0016);
+            vec2 q = p + drift;
             float cloud =
-              sin(p.x * 1.7 + p.y * 1.1) * 0.34 +
-              sin(p.x * 3.9 - p.y * 2.4) * 0.22 +
-              sin(p.x * 8.3 + p.y * 6.1) * 0.13 +
-              sin(p.x * 17.0 - p.y * 13.0) * 0.07;
+              sin(q.x * 1.7 + q.y * 1.1) * 0.34 +
+              sin(q.x * 3.9 - q.y * 2.4) * 0.22 +
+              sin(q.x * 8.3 + q.y * 6.1) * 0.13 +
+              sin(q.x * 17.0 - q.y * 13.0) * 0.07;
             float cloudMask = smoothstep(0.12, 0.92, h * 0.5 + 0.5) * smoothstep(0.0, 0.28, h);
             color += vec3(0.11, 0.15, 0.23) * cloud * cloudMask * 0.9;
 
@@ -447,15 +540,148 @@ const SkyDome = ({ night }: { night: boolean }) => {
   );
 
   useEffect(() => {
+    material.uniforms.uMoonDirection.value.copy(moonDirection);
     material.uniforms.uOpacity.value = night ? 1 : 0;
+  }, [material, moonDirection, night]);
+
+  useEffect(() => {
     return () => {
       material.dispose();
     };
-  }, [material, night]);
+  }, [material]);
+
+  useFrame((_state, delta) => {
+    if (!night || !animate) return;
+    material.uniforms.uTime.value += Math.min(delta, 0.05);
+  });
 
   return (
     <mesh material={material} renderOrder={-10} visible={night}>
       <sphereGeometry args={[14000, 48, 32]} />
+    </mesh>
+  );
+};
+
+// 白天云层：独立的半透明奶白云，缓慢横移，给晴朗天空一点生气。
+const DayClouds = ({
+  animate,
+  sunDirection,
+}: {
+  animate: boolean;
+  sunDirection: THREE.Vector3;
+}) => {
+  const material = useMemo(
+    () =>
+      new THREE.ShaderMaterial({
+        uniforms: {
+          uTime: { value: 0 },
+          uOpacity: { value: 0 },
+          // 初值占位，真实方向由下方 effect 写入，避免视口变化时重建材质。
+          uSunDirection: {
+            value: new THREE.Vector3(0.5, 0.2, -0.8).normalize(),
+          },
+        },
+        vertexShader: `
+          varying vec3 vDirection;
+
+          void main() {
+            vDirection = normalize((modelMatrix * vec4(position, 1.0)).xyz);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uTime;
+          uniform float uOpacity;
+          uniform vec3 uSunDirection;
+          varying vec3 vDirection;
+
+          // 取值稳定的小型伪噪声，避免出现明显的条纹
+          float hash(vec2 p) {
+            return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+          }
+
+          float noise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            vec2 u = f * f * (3.0 - 2.0 * f);
+            return mix(
+              mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+              mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x),
+              u.y
+            );
+          }
+
+          float fbm(vec2 p) {
+            float value = 0.0;
+            float amp = 0.5;
+            for (int i = 0; i < 4; i++) {
+              value += amp * noise(p);
+              p *= 2.07;
+              amp *= 0.5;
+            }
+            return value;
+          }
+
+          void main() {
+            vec3 dir = normalize(vDirection);
+            float h = clamp(dir.y, 0.0, 1.0);
+
+            // 仅在地平线以上铺云
+            float skyMask = smoothstep(0.015, 0.16, h);
+            // 天顶方向云量减少，避免顶部一块厚重的白云压下来
+            skyMask *= 1.0 - smoothstep(0.45, 0.95, h) * 0.72;
+
+            // 投影到云层平面，越靠近地平线越密
+            vec2 p = dir.xz / max(dir.y * 0.85 + 0.28, 0.2);
+            // 两层不同速度的漂移，形成缓慢流动的层次
+            vec2 drift = vec2(uTime * 0.010, uTime * 0.0038);
+            float base = fbm(p * 1.15 + drift);
+            float detail = fbm(p * 3.1 - drift * 1.6 + vec2(3.7, 1.2));
+
+            float density = base * 0.68 + detail * 0.32;
+            // 高度越高越稀薄
+            density *= mix(1.0, 0.45, smoothstep(0.1, 0.85, h));
+            // 阈值按 fbm 实测分布校准（p50≈0.42, p90≈0.52）
+            float cloud = smoothstep(0.40, 0.54, density) * skyMask;
+
+            // 朝向太阳的一侧更亮
+            float sunAlign = max(dot(dir, uSunDirection), 0.0);
+            vec3 cloudColor = mix(
+              vec3(0.93, 0.95, 0.98),
+              vec3(1.0, 0.99, 0.96),
+              sunAlign * 0.7
+            );
+
+            gl_FragColor = vec4(cloudColor, cloud * 0.52 * uOpacity);
+          }
+        `,
+        side: THREE.BackSide,
+        transparent: true,
+        depthWrite: false,
+        toneMapped: false,
+      }),
+    [],
+  );
+
+  useEffect(() => {
+    material.uniforms.uSunDirection.value.copy(sunDirection);
+  }, [material, sunDirection]);
+
+  useEffect(() => {
+    material.uniforms.uOpacity.value = 1;
+    return () => {
+      material.dispose();
+    };
+  }, [material]);
+
+  useFrame((_state, delta) => {
+    if (!animate) return;
+    material.uniforms.uTime.value += Math.min(delta, 0.05);
+  });
+
+  return (
+    <mesh material={material} renderOrder={-9}>
+      <sphereGeometry args={[13500, 48, 32]} />
     </mesh>
   );
 };
@@ -492,6 +718,11 @@ const Scene = ({ hourOverride }: { hourOverride: number | null }) => {
   const [night, setNight] = useState(false);
   const reducedMotion = useReducedMotion();
   const theme = night ? THEME.night : THEME.day;
+  const sunDirection = useSkyDirection(SKY_ANCHOR.day);
+  const sunPosition = useMemo(
+    () => sunDirection.clone().multiplyScalar(SUN_DISTANCE),
+    [sunDirection],
+  );
 
   useEffect(() => {
     camera.layers.enable(REFLECTION_EXCLUDED_LAYER);
@@ -519,9 +750,15 @@ const Scene = ({ hourOverride }: { hourOverride: number | null }) => {
       <pointLight ref={lightARef} decay={0} position={[100, 100, 100]} />
       <pointLight ref={lightBRef} decay={0.5} position={[-100, -100, -100]} />
       <group visible={!night}>
-        <Sky sunPosition={DAY_SUN_POSITION} turbidity={0.1} />
+        <Sky
+          sunPosition={[sunPosition.x, sunPosition.y, sunPosition.z]}
+          turbidity={0.1}
+        />
       </group>
-      <SkyDome night={night} />
+      <group visible={!night}>
+        <DayClouds animate={!reducedMotion} sunDirection={sunDirection} />
+      </group>
+      <SkyDome night={night} animate={!reducedMotion} />
       <Suspense fallback={null}>
         <Ocean theme={theme} animate={!reducedMotion} />
       </Suspense>
